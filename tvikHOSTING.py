@@ -16,6 +16,8 @@ from datetime import datetime, timedelta
 import threading
 import math
 import schedule
+import logging
+logging.basicConfig(level=logging.INFO)
 
 # ---------- НАСТРОЙКИ ----------
 TOKEN = '8263170749:AAHiUNlxpT2sVCWZauKQKhMsNDHhjaoCN8Q'
@@ -794,9 +796,69 @@ def save_profile_picture(message):
     
     bot.reply_to(message, "✅ Картинка профиля успешно сохранена!")
 
-def cmd_picture(message):
-    """Заглушка для команды /картинка"""
-    bot.reply_to(message, "❌ Отправьте фото с подписью /картинка")
+def save_profile_photo(message):
+    """Сохраняет фото в профиль"""
+    user_id = message.from_user.id
+    
+    # Получаем фото максимального размера
+    photo = message.photo[-1]
+    file_id = photo.file_id
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    
+    # Создаем таблицу если её нет
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS profile_media (
+            user_id INTEGER PRIMARY KEY,
+            file_id TEXT,
+            media_type TEXT,
+            updated_date TEXT
+        )
+    ''')
+    
+    # Сохраняем
+    cursor.execute('''
+        INSERT OR REPLACE INTO profile_media (user_id, file_id, media_type, updated_date)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, file_id, 'photo', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, "✅ Фото профиля успешно сохранено!")
+
+def save_profile_gif(message):
+    """Сохраняет гифку в профиль"""
+    user_id = message.from_user.id
+    
+    # Получаем гифку
+    animation = message.animation
+    file_id = animation.file_id
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    
+    # Создаем таблицу если её нет
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS profile_media (
+            user_id INTEGER PRIMARY KEY,
+            file_id TEXT,
+            media_type TEXT,
+            updated_date TEXT
+        )
+    ''')
+    
+    # Сохраняем
+    cursor.execute('''
+        INSERT OR REPLACE INTO profile_media (user_id, file_id, media_type, updated_date)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, file_id, 'animation', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, "✅ GIF профиля успешно сохранена!")
 
 def cmd_delpicture(message):
     """Удаляет картинку из профиля"""
@@ -854,15 +916,19 @@ def cmd_loseimage(message):
     bot.reply_to(message, "Отправьте фото с подписью /lose чтобы установить картинку проигрыша")
 
 # ===== ОБРАБОТЧИК СООБЩЕНИЙ С ФОТО =====
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    """Обрабатывает сообщения с фотографиями"""
+@bot.message_handler(content_types=['photo', 'animation'])
+def handle_media(message):
+    """Обрабатывает сообщения с фотографиями и гифками"""
+    print(f"📸 Получено медиа от {message.from_user.id}")
+    print(f"📝 Тип: {'фото' if message.photo else 'гифка'}")
+    print(f"📝 Подпись: {message.caption}")
+    
     if message.chat.type not in ['group', 'supergroup']:
         return
-    
+
     user = message.from_user
     create_user_if_not_exists(user.id, user.username, user.first_name, user.last_name)
-    
+
     # Проверяем мут и режим тишины
     muted, until_time, reason = is_muted(user.id, message.chat.id)
     if muted:
@@ -874,13 +940,21 @@ def handle_photo(message):
         bot.delete_message(message.chat.id, message.message_id)
         return
 
-    # Проверяем, есть ли в подписи к фото команда
+    # Проверяем, есть ли в подписи к медиа команда
     if message.caption:
         caption_text = message.caption.lower().strip()
+        print(f"🔍 Обрабатываем подпись: {caption_text}")
         
-        # Команда для картинки профиля
-        if caption_text in ['/картинка', '/picture', '/фото']:
-            save_profile_picture(message)
+        # Команда для фото
+        if caption_text == '/картинка' or caption_text == '/picture' or caption_text == '/фото':
+            print("✅ Обнаружена команда /картинка")
+            save_profile_photo(message)
+            return
+        
+        # Команда для гифки
+        elif caption_text == '/gif' or caption_text == '/гиф':
+            print("✅ Обнаружена команда /гиф")
+            save_profile_gif(message)
             return
         
         # Команды для картинок казино (только для владельца)
@@ -892,8 +966,10 @@ def handle_photo(message):
                 save_lose_image(message)
                 return
     
-    # Если это просто фото без команды, обновляем статистику
+    print("❌ Команда не обнаружена, просто фото")
     update_user_stats(user.id, message.chat.id)
+
+
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
@@ -1207,7 +1283,6 @@ def cmd_help(message):
         help_text += "• /забрать [количество] - Забрать твисты\n"
         help_text += "• /createpromo [код] [активации] [твисты] - Создать промо (макс 500к)\n"
         help_text += "• /delpromo [код] - Удалить промокод\n"
-        help_text += "• /asetname [ник] - Сменить ник пользователю\n\n"
 
     # Команды для Главного администратора
     if bot_admin_level >= 2:
