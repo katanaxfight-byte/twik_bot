@@ -93,7 +93,13 @@ COMMANDS = {
     'fight': ['бой', 'fight'],
     'givemedal': ['givemedal', 'выдатьмедаль'],
     'statsevent': ['statsevent', 'статистикаивента'],
-    'gif': ['gif', 'гиф']
+    'gif': ['gif', 'гиф'],
+    'setga': ['setga', 'выдатьга', 'главныйадмин'],
+    'setmoderbot': ['setmoderbot', 'назначитьмодера', 'датьмодербота'],
+    'unmoderbot': ['unmoderbot', 'снятьмодера', 'убратьмодеработа'],
+    'banbot': ['banbot', 'забанитьбота', 'ограничитьбота'],
+    'unbanbot': ['unbanbot', 'разбанитьбота', 'снятьограничениебота'],
+    'setpisun': ['setpisun', 'выдатьписюн', 'установитьписюн']
 }
 
 # ---------- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ----------
@@ -271,7 +277,9 @@ def init_db():
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS bot_admins (
-            user_id INTEGER PRIMARY KEY
+            user_id INTEGER PRIMARY KEY,
+            admin_level INTEGER DEFAULT 1,
+            appointed_date TEXT
         )
     ''')
 
@@ -328,7 +336,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS profile_media (
             user_id INTEGER PRIMARY KEY,
             file_id TEXT,
-            media_type TEXT,  -- 'photo' или 'animation'
+            media_type TEXT,
             updated_date TEXT
         )
     ''')
@@ -350,7 +358,7 @@ def init_db():
         )
     ''')
 
-    # ===== НОВЫЕ ТАБЛИЦЫ ДЛЯ ИВЕНТА =====
+    # ===== ТАБЛИЦЫ ДЛЯ ИВЕНТА =====
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS event_boss (
             id INTEGER PRIMARY KEY DEFAULT 1,
@@ -387,10 +395,44 @@ def init_db():
         )
     ''')
 
+    # ===== ТАБЛИЦЫ ДЛЯ БАНОВ БОТА =====
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_bans (
+            user_id INTEGER PRIMARY KEY,
+            until_time INTEGER,
+            reason TEXT,
+            banned_by INTEGER,
+            banned_date TEXT
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
 init_db()
+
+# Добавьте этот код в начало файла (после init_db) и запустите один раз
+def add_admin_level_column():
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('ALTER TABLE bot_admins ADD COLUMN admin_level INTEGER DEFAULT 1')
+        print("✅ Колонка admin_level добавлена")
+    except:
+        print("❌ Колонка уже существует или ошибка")
+    
+    try:
+        cursor.execute('ALTER TABLE bot_admins ADD COLUMN appointed_date TEXT')
+        print("✅ Колонка appointed_date добавлена")
+    except:
+        print("❌ Колонка уже существует или ошибка")
+    
+    conn.commit()
+    conn.close()
+
+# Вызовите эту функцию один раз
+add_admin_level_column()
 
 def update_users_table():
     conn = sqlite3.connect('bot_data.db')
@@ -611,6 +653,20 @@ def get_warns_count(user_id, chat_id):
     count = cursor.fetchone()[0]
     conn.close()
     return count
+    
+def check_bot_admin_level(user_id):
+    if user_id == OWNER_ID:
+        return 3  # Владелец (самый высокий уровень)
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT admin_level FROM bot_admins WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        return result[0]  # 1 - мл.модератор, 2 - главный администратор
+    return 0  # Обычный пользователь
 
 # Удалите все предыдущие функции с курсом и вставьте эти:
 
@@ -846,6 +902,13 @@ def handle_all_messages(message):
 
     user = message.from_user
     create_user_if_not_exists(user.id, user.username, user.first_name, user.last_name)
+    
+    # Проверяем бан бота
+    banned, until_time, ban_reason = is_bot_banned(user.id)
+    if banned:
+        # Удаляем сообщение забаненного пользователя
+        bot.delete_message(message.chat.id, message.message_id)
+        return
 
     try:
         chat_member = bot.get_chat_member(message.chat.id, user.id)
@@ -903,6 +966,24 @@ def process_commands(message):
     elif command in ['хуй', 'писюн']:
         print("✅ Распознана команда: хуй")
         cmd_hui(message)
+        return
+    elif command in ['setga', 'выдатьга', 'главныйадмин']:
+        cmd_setga(message)
+        return
+    elif command in ['setmoderbot', 'назначитьмодера', 'датьмодербота']:
+        cmd_setmoderbot(message)
+        return
+    elif command in ['unmoderbot', 'снятьмодера', 'убратьмодеработа']:
+        cmd_unmoderbot(message)
+        return
+    elif command in ['banbot', 'забанитьбота', 'ограничитьбота']:
+        cmd_banbot(message)
+        return
+    elif command in ['unbanbot', 'разбанитьбота', 'снятьограничениебота']:
+        cmd_unbanbot(message)
+        return
+    elif command in ['setpisun', 'выдатьписюн', 'установитьписюн']:
+        cmd_setpisun(message)
         return
     elif command in ['gif', 'гиф']:
         cmd_picture(message)
@@ -1048,9 +1129,21 @@ def cmd_help(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     level = check_admin_level(user_id, chat_id)
-    is_bot_admin = check_bot_admin(user_id)
+    bot_admin_level = check_bot_admin_level(user_id)
 
-    help_text = f"📋 Доступные команды\nВаш уровень: {get_admin_level_name(level)}\n\n"
+    help_text = f"📋 Доступные команды\n"
+    help_text += f"Ваш уровень в чате: {get_admin_level_name(level)}\n"
+    
+    # Отображаем уровень в боте
+    if user_id == OWNER_ID:
+        help_text += f"👑 Ваш уровень в боте: ВЛАДЕЛЕЦ БОТА\n\n"
+    elif bot_admin_level == 2:
+        help_text += f"👑 Ваш уровень в боте: Главный администратор\n\n"
+    elif bot_admin_level == 1:
+        help_text += f"🛡️ Ваш уровень в боте: Мл.модератор\n\n"
+    else:
+        help_text += f"👤 Ваш уровень в боте: Пользователь\n\n"
+    
     help_text += "👤 Для всех:\n"
     help_text += "• /profile - Показать профиль\n"
     help_text += "• /name [ник] - Установить ник\n"
@@ -1074,15 +1167,13 @@ def cmd_help(message):
     help_text += "• /топписька - Топ самых больших пиписьек\n"
     help_text += "• /магазин  - Магазин видеокарт для майнинга\n"
     help_text += "• /ферма - Твоя майнинг ферма\n"
-    help_text += "• /upd - Список последних обновлений бота\n\n"
-    help_text += "• /бонус - Получить бонус\n\n"
-    help_text += "• /картинка - Поставить картинку в профиль\n\n"
-    help_text += "• /event - Эвент бота\n\n"
-    help_text += "• /бой - Бой с боссом (эвент)\n\n"
-    help_text += "• /gif - Установить гифку в профиль\n\n"
+    help_text += "• /upd - Список последних обновлений бота\n"
+    help_text += "• /бонус - Получить ежедневный бонус (до 10 млн твистов)\n"
+    help_text += "• /event - Информация о текущем ивенте\n"
+    help_text += "• /бой - Начать бой с боссом в ивенте\n\n"
 
     if level > 0:
-        help_text += "🛡️ Команды администратора:\n"
+        help_text += "🛡️ Команды администратора чата:\n"
         perms = get_level_permissions(level)
         if perms['can_warn']:
             help_text += "• /warn [причина] - Выдать предупреждение\n"
@@ -1109,32 +1200,42 @@ def cmd_help(message):
         help_text += "• /sethi [текст] - Установить приветствие\n"
         help_text += "• /addpravila [текст] - Установить правила\n\n"
 
-    if is_bot_admin or user_id == OWNER_ID:
-        help_text += "🤖 Для администраторов бота:\n"
-        help_text += "• /выдать [кол-во] - Выдать твисты\n"
-        help_text += "• /забрать [кол-во] - Забрать твисты\n"
-        help_text += "• /asetname [ник] - Сменить ник\n"
-        help_text += "• /createpromo - Создать промо\n"
+    # Команды для Мл.модераторов
+    if bot_admin_level >= 1:
+        help_text += "🔰 Команды Мл.модератора бота:\n"
+        help_text += "• /выдать [количество] - Выдать твисты (макс 1 млн)\n"
+        help_text += "• /забрать [количество] - Забрать твисты\n"
+        help_text += "• /createpromo [код] [активации] [твисты] - Создать промо (макс 500к)\n"
         help_text += "• /delpromo [код] - Удалить промокод\n"
-        help_text += "• /giverub [кол-во] - Выдать рубли (только владелец)\n\n"
+        help_text += "• /asetname [ник] - Сменить ник пользователю\n\n"
 
+    # Команды для Главного администратора
+    if bot_admin_level >= 2:
+        help_text += "👑 Команды Главного администратора бота:\n"
+        help_text += "• /setmoderbot - Назначить мл.модератора (ответом)\n"
+        help_text += "• /unmoderbot - Снять мл.модератора (ответом)\n"
+        help_text += "• /banbot [время] - Забанить пользователя в боте\n"
+        help_text += "• /unbanbot - Разбанить пользователя в боте\n"
+        help_text += "• Все команды мл.модератора (без лимитов)\n\n"
+
+    # Команды для владельца бота
     if user_id == OWNER_ID:
-        help_text += "👑 Для владельца бота:\n"
-        help_text += "• /verificate - Верифицировать\n"
-        help_text += "• /setmyadmin - Получить админку 6\n"
+        help_text += "👑 Команды Владельца бота:\n"
+        help_text += "• /setga - Назначить главного администратора (ответом)\n"
+        help_text += "• /setpisun [см] - Установить размер пиписьки\n"
+        help_text += "• /verificate - Верифицировать пользователя\n"
+        help_text += "• /setmyadmin - Получить админку 6 в чате\n"
         help_text += "• /setadminbot - Назначить админа бота\n"
         help_text += "• /lixoradka [%] - Изменить шанс казино\n"
         help_text += "• /stoplixoradka [%] - Вернуть шанс казино\n"
         help_text += "• /givetoper - Выдать префикс топера\n"
         help_text += "• /obnulenie - Обнулить балансы всех пользователей\n"
+        help_text += "• /obnulbitoc - Обнулить биткоины у всех\n"
         help_text += "• /setupd [текст] - Добавить запись в список обновлений\n"
-        help_text += "• /изменитькурс [новая цена] - Изменить курс биткоина\n"
-        help_text += "• /giverub - Выдать донат\n\n"
-        help_text += "• /obnulbitoc - Обнулить биткоины у всех\n\n"
-        help_text += "• /lose - Изменить картинку проигрыша казино\n\n"
-        help_text += "• /win - Изменить картинку выигрыша казино\n\n"
-        help_text += "• /givemedal - Выдать медаль в профиль (эвент)\n\n"
-        help_text += "• /statsevent -Посмотреть самого активного пользователя(эвент)\n\n"
+        help_text += "• /изменитькурс [цена] - Изменить курс биткоина\n"
+        help_text += "• /givemedal - Выдать медаль пользователю\n"
+        help_text += "• /statsevent - Статистика ивента\n"
+        help_text += "• Все команды главного администратора\n"
 
     bot.reply_to(message, help_text)
 
@@ -1142,6 +1243,13 @@ def cmd_help(message):
 def cmd_profile(message):
     target = get_target_user(message) or message.from_user
     user_id = target.id
+    
+    # Проверяем бан бота
+    banned, until_time, ban_reason = is_bot_banned(user_id)
+    if banned:
+        until = datetime.fromtimestamp(until_time)
+        bot.reply_to(message, f"🔨 Вам ограничен доступ к боту до {until.strftime('%d.%m.%Y %H:%M')}\nПричина: {ban_reason}")
+        return
     
     # Проверяем, что это не бот
     if user_id == bot.get_me().id:
@@ -1179,7 +1287,7 @@ def cmd_profile(message):
     
     # Проверяем статус пользователя
     is_owner = user_id == OWNER_ID
-    is_bot_admin = check_bot_admin(user_id) and not is_owner
+    bot_admin_level = check_bot_admin_level(user_id)
     
     # Получаем медали
     cursor.execute('SELECT medal_bravery FROM medals WHERE user_id = ?', (user_id,))
@@ -1200,8 +1308,10 @@ def cmd_profile(message):
     
     if is_owner:
         profile_text += f"👑 ВЛАДЕЛЕЦ БОТА\n"
-    elif is_bot_admin:
-        profile_text += f"👺 АДМИН БОТА\n"
+    elif bot_admin_level == 2:
+        profile_text += f"👑 Главный администратор\n"
+    elif bot_admin_level == 1:
+        profile_text += f"🛡️ Мл.модератор\n"
     
     if verified:
         profile_text += f"✅ Верифицирован\n"
@@ -1232,7 +1342,6 @@ def cmd_profile(message):
                     reply_to_message_id=message.message_id
                 )
         except Exception as e:
-            # Если ошибка с медиа, удаляем его из базы и отправляем без медиа
             print(f"Ошибка с медиа профиля: {e}")
             
             # Удаляем нерабочее медиа из базы
@@ -1621,6 +1730,11 @@ def cmd_warn(message):
         conn.commit()
         conn.close()
         bot.send_message(message.chat.id, f"🔇 Пользователь {target.first_name} получил мут на 1 час (3/3 предупреждений)")
+        
+
+def check_bot_permission(user_id, required_level):
+    """Проверяет, есть ли у пользователя нужный уровень прав"""
+    return check_bot_admin_level(user_id) >= required_level
 
 def cmd_unwarn(message):
     if not check_permission(message.from_user.id, message.chat.id, 'can_warn'):
@@ -1772,8 +1886,9 @@ def cmd_setadminbot(message):
 
 def cmd_givetwist(message):
     user_id = message.from_user.id
+    user_level = check_bot_admin_level(user_id)
     
-    if not check_bot_admin(user_id) and user_id != OWNER_ID:
+    if user_level == 0 and user_id != OWNER_ID:
         bot.reply_to(message, "❌ У вас нет прав администратора бота")
         return
     
@@ -1792,6 +1907,11 @@ def cmd_givetwist(message):
         if amount <= 0:
             bot.reply_to(message, "❌ Сумма должна быть положительной")
             return
+        
+        if user_level == 1 and amount > 1000000:
+            bot.reply_to(message, "❌ Младшие модераторы могут выдавать не более 1,000,000 твистов")
+            return
+            
     except ValueError:
         bot.reply_to(message, "❌ Неверная сумма. Укажите число")
         return
@@ -1809,9 +1929,10 @@ def cmd_givetwist(message):
 
 def cmd_deltwist(message):
     user_id = message.from_user.id
+    user_level = check_bot_admin_level(user_id)
     
-    if not check_bot_admin(user_id) and user_id != OWNER_ID:
-        bot.reply_to(message, "❌ У вас нет прав администратора бота")
+    if not (user_id == OWNER_ID or user_level >= 1):
+        bot.reply_to(message, "❌ У вас нет прав")
         return
     
     if not message.reply_to_message:
@@ -1874,7 +1995,10 @@ def cmd_deltwist(message):
     bot.reply_to(message, f"✅ Ник пользователя {target.first_name} изменен на: {new_nick}")
 
 def cmd_createpromo(message):
-    if not check_bot_admin(message.from_user.id) and message.from_user.id != OWNER_ID:
+    user_id = message.from_user.id
+    user_level = check_bot_admin_level(user_id)
+    
+    if user_level == 0 and user_id != OWNER_ID:
         bot.reply_to(message, "❌ У вас нет прав администратора бота")
         return
     
@@ -1890,6 +2014,11 @@ def cmd_createpromo(message):
         if max_activations <= 0 or twists <= 0:
             bot.reply_to(message, "❌ Числа должны быть положительными")
             return
+        
+        if user_level == 1 and twists > 500000:
+            bot.reply_to(message, "❌ Младшие модераторы могут создавать промо не более чем на 500,000 твистов")
+            return
+            
     except:
         bot.reply_to(message, "❌ Неверные числа")
         return
@@ -4285,6 +4414,343 @@ def duel_event_callback(call):
         
         challenger_name = bot.get_chat(challenger_id).first_name
         bot.edit_message_text(f"❌ {challenger_name}, ваш вызов отклонен", call.message.chat.id, call.message.message_id)
+        
+        # ===== КОМАНДЫ ДЛЯ ДОЛЖНОСТЕЙ =====
+def cmd_setga(message):
+    """Выдать главного администратора бота (только для владельца)"""
+    if message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "❌ Только для владельца бота")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответьте на сообщение пользователя")
+        return
+    
+    target = message.reply_to_message.from_user
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    
+    # Устанавливаем уровень 2 (главный администратор)
+    cursor.execute('''
+        INSERT OR REPLACE INTO bot_admins (user_id, admin_level, appointed_date)
+        VALUES (?, 2, ?)
+    ''', (target.id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, f"✅ Пользователь {target.first_name} назначен Главным администратором бота")
+
+def cmd_setmoderbot(message):
+    """Назначить младшего модератора бота"""
+    user_id = message.from_user.id
+    
+    # Проверяем права (только владелец или главный админ)
+    if not (user_id == OWNER_ID or check_bot_admin_level(user_id) >= 2):
+        bot.reply_to(message, "❌ Недостаточно прав")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответьте на сообщение пользователя")
+        return
+    
+    target = message.reply_to_message.from_user
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    
+    # Устанавливаем уровень 1 (младший модератор)
+    cursor.execute('''
+        INSERT OR REPLACE INTO bot_admins (user_id, admin_level, appointed_date)
+        VALUES (?, 1, ?)
+    ''', (target.id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, f"✅ Пользователь {target.first_name} назначен Младшим модератором бота")
+
+def cmd_unmoderbot(message):
+    """Снять младшего модератора бота"""
+    user_id = message.from_user.id
+    
+    # Проверяем права (только владелец или главный админ)
+    if not (user_id == OWNER_ID or check_bot_admin_level(user_id) >= 2):
+        bot.reply_to(message, "❌ Недостаточно прав")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответьте на сообщение пользователя")
+        return
+    
+    target = message.reply_to_message.from_user
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM bot_admins WHERE user_id = ?', (target.id,))
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, f"✅ Пользователь {target.first_name} снят с должности модератора бота")
+
+# ===== КОМАНДЫ ДЛЯ МЛ.МОДЕРАТОРОВ =====
+def cmd_givetwist(message):
+    user_id = message.from_user.id
+    user_level = check_bot_admin_level(user_id)
+    
+    # Проверяем права (владелец, главный админ или мл.модератор)
+    if user_level == 0 and user_id != OWNER_ID:
+        bot.reply_to(message, "❌ У вас нет прав администратора бота")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответьте на сообщение пользователя, которому хотите выдать твисты")
+        return
+    
+    target = message.reply_to_message.from_user
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Использование: /выдать [количество] (ответом на сообщение)")
+        return
+    
+    try:
+        amount = int(args[1])
+        if amount <= 0:
+            bot.reply_to(message, "❌ Сумма должна быть положительной")
+            return
+        
+        # Проверяем лимит для мл.модераторов (максимум 1 млн)
+        if user_level == 1 and amount > 1000000:
+            bot.reply_to(message, "❌ Младшие модераторы могут выдавать не более 1,000,000 твистов")
+            return
+            
+    except ValueError:
+        bot.reply_to(message, "❌ Неверная сумма. Укажите число")
+        return
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET twists = twists + ? WHERE user_id = ?', (amount, target.id))
+    conn.commit()
+    
+    cursor.execute('SELECT twists FROM users WHERE user_id = ?', (target.id,))
+    new_balance = cursor.fetchone()[0]
+    conn.close()
+    
+    bot.reply_to(message, f"✅ Пользователю {target.first_name} выдано {amount} твистов\n💰 Новый баланс: {new_balance}")
+
+def cmd_createpromo(message):
+    user_id = message.from_user.id
+    user_level = check_bot_admin_level(user_id)
+    
+    # Проверяем права (владелец, главный админ или мл.модератор)
+    if user_level == 0 and user_id != OWNER_ID:
+        bot.reply_to(message, "❌ У вас нет прав администратора бота")
+        return
+    
+    args = message.text.split()
+    if len(args) < 4:
+        bot.reply_to(message, "❌ Использование: /createpromo [код] [кол-во активаций] [твисты]")
+        return
+    
+    code = args[1].upper()
+    try:
+        max_activations = int(args[2])
+        twists = int(args[3])
+        if max_activations <= 0 or twists <= 0:
+            bot.reply_to(message, "❌ Числа должны быть положительными")
+            return
+        
+        # Проверяем лимит для мл.модераторов (максимум 500к)
+        if user_level == 1 and twists > 500000:
+            bot.reply_to(message, "❌ Младшие модераторы могут создавать промо не более чем на 500,000 твистов")
+            return
+            
+    except:
+        bot.reply_to(message, "❌ Неверные числа")
+        return
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT * FROM promocodes WHERE code = ?', (code,))
+    if cursor.fetchone():
+        bot.reply_to(message, f"❌ Промокод {code} уже существует")
+        conn.close()
+        return
+    
+    cursor.execute('INSERT INTO promocodes (code, twists, max_activations, current_activations) VALUES (?, ?, ?, 0)',
+                  (code, twists, max_activations))
+    
+    conn.commit()
+    conn.close()
+    bot.reply_to(message, f"✅ Промокод {code} создан! Твистов: {twists}, активаций: {max_activations}")
+
+# ===== КОМАНДЫ ДЛЯ БАНА БОТА =====
+def cmd_banbot(message):
+    """Ограничить доступ к боту на время"""
+    user_id = message.from_user.id
+    user_level = check_bot_admin_level(user_id)
+    
+    # Проверяем права (владелец или главный админ)
+    if not (user_id == OWNER_ID or user_level >= 2):
+        bot.reply_to(message, "❌ Недостаточно прав")
+        return
+    
+    # Получаем целевого пользователя
+    if message.reply_to_message:
+        target = message.reply_to_message.from_user
+        args = message.text.split()
+        time_str = args[1] if len(args) > 1 else '1h'
+    else:
+        if len(message.text.split()) < 3:
+            bot.reply_to(message, "❌ Использование: /banbot @юзернейм [время] или /banbot [время] (ответом)")
+            return
+        username = message.text.split()[1].replace('@', '')
+        time_str = message.text.split()[2] if len(message.text.split()) > 2 else '1h'
+        
+        # Ищем пользователя по username
+        conn = sqlite3.connect('bot_data.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result:
+            bot.reply_to(message, f"❌ Пользователь @{username} не найден")
+            return
+        target = bot.get_chat(result[0])
+    
+    # Парсим время
+    seconds = parse_time(time_str)
+    if not seconds:
+        seconds = 3600  # 1 час по умолчанию
+    
+    until_time = int(time.time()) + seconds
+    
+    reason = ' '.join(message.text.split()[3:]) if len(message.text.split()) > 3 else "Без причины"
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO bot_bans (user_id, until_time, reason, banned_by, banned_date)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (target.id, until_time, reason, user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    conn.commit()
+    conn.close()
+    
+    time_str_formatted = f"{seconds//3600} часов" if seconds >= 3600 else f"{seconds//60} минут"
+    bot.reply_to(message, f"🔨 Пользователю {target.first_name} ограничен доступ к боту на {time_str_formatted}\nПричина: {reason}")
+
+def cmd_unbanbot(message):
+    """Снять ограничение доступа к боту"""
+    user_id = message.from_user.id
+    user_level = check_bot_admin_level(user_id)
+    
+    # Проверяем права (владелец или главный админ)
+    if not (user_id == OWNER_ID or user_level >= 2):
+        bot.reply_to(message, "❌ Недостаточно прав")
+        return
+    
+    # Получаем целевого пользователя
+    if message.reply_to_message:
+        target = message.reply_to_message.from_user
+    else:
+        if len(message.text.split()) < 2:
+            bot.reply_to(message, "❌ Использование: /unbanbot @юзернейм или /unbanbot (ответом)")
+            return
+        username = message.text.split()[1].replace('@', '')
+        
+        conn = sqlite3.connect('bot_data.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result:
+            bot.reply_to(message, f"❌ Пользователь @{username} не найден")
+            return
+        target = bot.get_chat(result[0])
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM bot_bans WHERE user_id = ?', (target.id,))
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, f"✅ С пользователя {target.first_name} снято ограничение доступа к боту")
+
+def cmd_setpisun(message):
+    """Выдать писюн определенного размера (только для владельца)"""
+    if message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "❌ Только для владельца бота")
+        return
+    
+    # Получаем целевого пользователя
+    if message.reply_to_message:
+        target = message.reply_to_message.from_user
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "❌ Укажите размер в см. Пример: /setpisun 15 (ответом)")
+            return
+    else:
+        if len(message.text.split()) < 3:
+            bot.reply_to(message, "❌ Использование: /setpisun @юзернейм [размер]")
+            return
+        username = message.text.split()[1].replace('@', '')
+        size = message.text.split()[2]
+        
+        conn = sqlite3.connect('bot_data.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if not result:
+            bot.reply_to(message, f"❌ Пользователь @{username} не найден")
+            return
+        target = bot.get_chat(result[0])
+        args = [size]
+    
+    try:
+        size = int(args[1] if message.reply_to_message else args[0])
+        if size < 0:
+            bot.reply_to(message, "❌ Размер должен быть положительным")
+            return
+    except:
+        bot.reply_to(message, "❌ Неверный размер. Укажите число")
+        return
+    
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET piska_size = ? WHERE user_id = ?', (size, target.id))
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, f"✅ Пользователю {target.first_name} установлен размер пиписьки: {size} см")
+
+# ===== ФУНКЦИЯ ПРОВЕРКИ БАНА БОТА =====
+def is_bot_banned(user_id):
+    """Проверяет, забанен ли пользователь в боте"""
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT until_time, reason FROM bot_bans WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        until_time, reason = result
+        if time.time() < until_time:
+            return True, until_time, reason
+        else:
+            # Удаляем просроченный бан
+            conn = sqlite3.connect('bot_data.db')
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM bot_bans WHERE user_id = ?', (user_id,))
+            conn.commit()
+            conn.close()
+    return False, None, None
 
 # ---------- ЗАПУСК БОТА ----------
 if __name__ == '__main__':
